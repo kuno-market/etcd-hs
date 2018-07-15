@@ -10,6 +10,8 @@ license-file: UNLICENSE
 git: git://github.com/wereHamster/etcd-hs.git
 dependencies:
 - text
+- string-conv
+- bytestring
 library:
   source-dirs: src
   ghc-options: -Wall
@@ -18,7 +20,6 @@ library:
   dependencies:
   - aeson
   - base >=4.6 && <5
-  - bytestring
   - http-conduit
   - time
 tests:

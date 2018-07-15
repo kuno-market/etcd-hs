@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleContexts    #-}
 
 {-|
 
@@ -43,15 +44,16 @@ import           Data.Time.LocalTime
 import           Data.List
 import           Data.Text (Text)
 import qualified Data.Text as T
-import           Data.Text.Encoding
 import           Data.Monoid
-import           Data.ByteString.Lazy (ByteString)
+import qualified Data.ByteString.Lazy as LBS (ByteString)
+import           Data.ByteString (ByteString)
+import           Data.String.Conv (toS)
 
 import           Control.Applicative
 import           Control.Exception
 import           Control.Monad
 
-import           Network.HTTP.Conduit hiding (Response, path)
+import           Network.HTTP.Conduit hiding (Response)
 
 import           Prelude
 
@@ -59,23 +61,23 @@ import           Prelude
 -- | The 'Client' holds all data required to make requests to the etcd
 -- cluster. You should use 'createClient' to initialize a new client.
 data Client = Client
-    { leaderUrl :: !Text
+    { leaderUrl :: !ByteString
       -- ^ The URL to the leader. HTTP requests are sent to this server.
     }
 
 
 
 -- | The version prefix used in URLs. The current client supports v2.
-versionPrefix :: Text
+versionPrefix :: ByteString
 versionPrefix = "v2"
 
 
 -- | The URL to the given key.
-keyUrl :: Client -> Key -> Text
+keyUrl :: Client -> Key -> ByteString
 keyUrl client key = leaderUrl client <> "/" <> versionPrefix <> "/keys/" <> key
 
 -- | The URL to the given key with appropriate pre-conditions. Used by setcas
-keyCasUrl :: Client -> Key -> Text -> Text
+keyCasUrl :: Client -> Key -> ByteString -> ByteString
 keyCasUrl client key oldVal = leaderUrl client <> "/" <> versionPrefix <> "/keys/" <> key <> "?prevValue=" <> oldVal
 
 ------------------------------------------------------------------------------
@@ -129,12 +131,12 @@ type Index = Int
 
 -- | Keys are strings, formatted like filesystem paths (ie. slash-delimited
 -- list of path components).
-type Key = Text
+type Key = ByteString
 
 
 -- | Values attached to leaf nodes are strings. If you want to store
 -- structured data in the values, you'll need to encode it into a string.
-type Value = Text
+type Value = ByteString
 
 
 -- | TTL is specified in seconds. The server accepts negative values, but they
@@ -189,11 +191,11 @@ data Node = Node
 
 instance FromJSON Node where
     parseJSON (Object o) = Node
-        <$> o .:? "key" .!= "/"
+        <$> fmap toS (o .:? "key" .!= ("/" :: String))
         <*> o .:? "createdIndex" .!= 0
         <*> o .:? "modifiedIndex" .!= 0
         <*> o .:? "dir" .!= False
-        <*> o .:? "value"
+        <*> fmap (fmap (toS :: String -> Value)) (o .:? "value")
         <*> o .:? "nodes"
         <*> o .:? "ttl"
         <*> (fmap zonedTimeToUTC <$> (o .:? "expiration"))
@@ -216,17 +218,17 @@ throw an exception if the server is unreachable or not responding.
 -- A type synonym for a http response.
 type HR = Either Error Response
 
-decodeResponseBody :: ByteString -> IO HR
+decodeResponseBody :: LBS.ByteString -> IO HR
 decodeResponseBody body = do
     return $ case eitherDecode body of
         Left e  -> Left $ Error (T.pack e)
         Right n -> Right n
 
 
-httpGET :: Text -> [(Text, Text)] -> IO HR
+httpGET :: ByteString -> [(ByteString, ByteString)] -> IO HR
 httpGET url params = do
-    req'  <- acceptJSON <$> parseUrl (T.unpack url)
-    let req = setQueryString (map (\(k,v) -> (encodeUtf8 k, Just $ encodeUtf8 v)) params) $ req'
+    req'  <- acceptJSON <$> parseRequest (toS url)
+    let req = setQueryString (fmap (fmap Just) params) $ req'
     body <- responseBody <$> (withHttpManager $ httpLbs req)
     decodeResponseBody body
 
@@ -235,19 +237,19 @@ httpGET url params = do
     acceptJSON req = req { requestHeaders = acceptHeader : requestHeaders req }
 
 
-httpPUT :: Text -> [(Text, Text)] -> IO HR
+httpPUT :: ByteString -> [(ByteString, ByteString)] -> IO HR
 httpPUT url params = do
-    req' <- parseUrl (T.unpack url)
-    let req = urlEncodedBody (map (\(k,v) -> (encodeUtf8 k, encodeUtf8 v)) params) $ req'
+    req' <- parseRequest (toS url)
+    let req = urlEncodedBody params $ req'
 
     body <- responseBody <$> (withHttpManager $ httpLbs $ req { method = "PUT" })
     decodeResponseBody body
 
 
-httpPOST :: Text -> [(Text, Text)] -> IO HR
+httpPOST :: ByteString -> [(ByteString, ByteString)] -> IO HR
 httpPOST url params = do
-    req' <- parseUrl (T.unpack url)
-    let req = urlEncodedBody (map (\(k,v) -> (encodeUtf8 k, encodeUtf8 v)) params) $ req'
+    req' <- parseRequest (toS url)
+    let req = urlEncodedBody params $ req'
 
     body <- responseBody <$> (withHttpManager $ httpLbs $ req { method = "POST" })
     decodeResponseBody body
@@ -255,9 +257,9 @@ httpPOST url params = do
 
 -- | Issue a DELETE request to the given url. Since DELETE requests don't have
 -- a body, the params are appended to the URL as a query string.
-httpDELETE :: Text -> [(Text, Text)] -> IO HR
+httpDELETE :: ByteString -> [(ByteString, ByteString)] -> IO HR
 httpDELETE url params = do
-    req  <- parseUrl $ T.unpack $ url <> (asQueryParams params)
+    req  <- parseRequest $ toS $ url <> (asQueryParams params)
     body <- responseBody <$> (withHttpManager $ httpLbs $ req { method = "DELETE" })
     decodeResponseBody body
 
@@ -277,9 +279,9 @@ runRequest' m = either (const Nothing) (Just . _resNode) <$> runRequest m
 
 
 -- | Encode an optional TTL into a param pair.
-ttlParam :: Maybe TTL -> [(Text, Text)]
+ttlParam :: Maybe TTL -> [(ByteString, ByteString)]
 ttlParam Nothing    = []
-ttlParam (Just ttl) = [("ttl", T.pack $ show ttl)]
+ttlParam (Just ttl) = [("ttl", toS $ show ttl)]
 
 
 
@@ -292,7 +294,7 @@ Public API
 
 -- | Create a new client and initialize it with a list of seed machines. The
 -- list must be non-empty.
-createClient :: [ Text ] -> IO Client
+createClient :: [ ByteString ] -> IO Client
 createClient seed = return $ Client (head seed)
 
 
@@ -303,14 +305,14 @@ Low-level key operations
 
 -}
 
-waitParam :: (Text, Text)
+waitParam :: (ByteString, ByteString)
 waitParam = ("wait","true")
 
-waitRecursiveParam :: (Text, Text)
+waitRecursiveParam :: (ByteString, ByteString)
 waitRecursiveParam = ("recursive","true")
 
-waitIndexParam :: Index -> (Text, Text)
-waitIndexParam i = ("waitIndex", (T.pack $ show i))
+waitIndexParam :: Index -> (ByteString, ByteString)
+waitIndexParam i = ("waitIndex", (toS $ show i))
 
 
 -- | Get the node at the given key.
@@ -377,10 +379,10 @@ manipulating directories one must include dir=true in the request params.
 
 -}
 
-dirParam :: [(Text, Text)]
+dirParam :: [(ByteString, ByteString)]
 dirParam = [("dir","true")]
 
-recursiveParam :: [(Text, Text)]
+recursiveParam :: [(ByteString, ByteString)]
 recursiveParam = [("recursive","true")]
 
 

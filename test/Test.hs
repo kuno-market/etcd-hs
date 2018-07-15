@@ -8,6 +8,8 @@ import           Data.Char
 import           Data.Maybe
 import           Data.Text (Text)
 import qualified Data.Text as T
+import           Data.ByteString (ByteString)
+import           Data.String.Conv (toS)
 import           Data.Monoid
 
 import           Control.Applicative
@@ -24,10 +26,10 @@ main :: IO ()
 main = hspec spec
 
 
-randomKey :: IO Text
+randomKey :: IO ByteString
 randomKey = do
     rnd <- evalRandIO (sequence $ repeat $ getRandomR (0, 61))
-    return $ T.pack $ take 13 $ map alnum rnd
+    return $ toS $ take 13 $ map alnum rnd
   where
     alnum :: Int -> Char
     alnum x
@@ -37,7 +39,7 @@ randomKey = do
         | otherwise = error $ "Out of range: " ++ show x
 
 
-setup :: IO (Client, Text)
+setup :: IO (Client, ByteString)
 setup = do
     client <- createClient [ "http://127.0.0.1:4001" ]
     key    <- randomKey
