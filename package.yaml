@@ -1,0 +1,37 @@
+name: etcd
+version: '1.0.5'
+synopsis: Client for etcd, a highly-available key value store
+description: See <https://coreos.com/using-coreos/etcd/>
+category: Network
+author: Tomas Carnecky
+maintainer: tomas.carnecky@gmail.com
+license: OtherLicense
+license-file: UNLICENSE
+git: git://github.com/wereHamster/etcd-hs.git
+dependencies:
+- text
+library:
+  source-dirs: src
+  ghc-options: -Wall
+  exposed-modules:
+  - Network.Etcd
+  dependencies:
+  - aeson
+  - base >=4.6 && <5
+  - bytestring
+  - http-conduit
+  - time
+tests:
+  test:
+    main: Test.hs
+    source-dirs: test
+    ghc-options:
+    - -threaded
+    - -with-rtsopts=-N
+    dependencies:
+    - async
+    - MonadRandom
+    - base
+    - etcd
+    - hspec
+    - mtl
