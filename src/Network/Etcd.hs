@@ -63,6 +63,8 @@ import           Prelude
 data Client = Client
     { leaderUrl :: !ByteString
       -- ^ The URL to the leader. HTTP requests are sent to this server.
+    , manager   :: !Manager
+      -- ^ The global, common connection manager to use for all requests.
     }
 
 
@@ -225,11 +227,11 @@ decodeResponseBody body = do
         Right n -> Right n
 
 
-httpGET :: ByteString -> [(ByteString, ByteString)] -> IO HR
-httpGET url params = do
+httpGET :: Manager -> ByteString -> [(ByteString, ByteString)] -> IO HR
+httpGET mgr url params = do
     req'  <- acceptJSON <$> parseRequest (toS url)
     let req = setQueryString (fmap (fmap Just) params) $ req'
-    body <- responseBody <$> (withHttpManager $ httpLbs req)
+    body <- responseBody <$> httpLbs req mgr
     decodeResponseBody body
 
   where
@@ -237,30 +239,30 @@ httpGET url params = do
     acceptJSON req = req { requestHeaders = acceptHeader : requestHeaders req }
 
 
-httpPUT :: ByteString -> [(ByteString, ByteString)] -> IO HR
-httpPUT url params = do
+httpPUT :: Manager -> ByteString -> [(ByteString, ByteString)] -> IO HR
+httpPUT mgr url params = do
     req' <- parseRequest (toS url)
     let req = urlEncodedBody params $ req'
 
-    body <- responseBody <$> (withHttpManager $ httpLbs $ req { method = "PUT" })
+    body <- responseBody <$> httpLbs (req { method = "PUT" }) mgr
     decodeResponseBody body
 
 
-httpPOST :: ByteString -> [(ByteString, ByteString)] -> IO HR
-httpPOST url params = do
+httpPOST :: Manager -> ByteString -> [(ByteString, ByteString)] -> IO HR
+httpPOST mgr url params = do
     req' <- parseRequest (toS url)
     let req = urlEncodedBody params $ req'
 
-    body <- responseBody <$> (withHttpManager $ httpLbs $ req { method = "POST" })
+    body <- responseBody <$> httpLbs (req { method = "POST" }) mgr
     decodeResponseBody body
 
 
 -- | Issue a DELETE request to the given url. Since DELETE requests don't have
 -- a body, the params are appended to the URL as a query string.
-httpDELETE :: ByteString -> [(ByteString, ByteString)] -> IO HR
-httpDELETE url params = do
+httpDELETE :: Manager -> ByteString -> [(ByteString, ByteString)] -> IO HR
+httpDELETE mgr url params = do
     req  <- parseRequest $ toS $ url <> (asQueryParams params)
-    body <- responseBody <$> (withHttpManager $ httpLbs $ req { method = "DELETE" })
+    body <- responseBody <$> httpLbs (req { method = "DELETE" }) mgr
     decodeResponseBody body
 
   where
@@ -295,7 +297,7 @@ Public API
 -- | Create a new client and initialize it with a list of seed machines. The
 -- list must be non-empty.
 createClient :: [ ByteString ] -> IO Client
-createClient seed = return $ Client (head seed)
+createClient seed = Client (head seed) <$> newManager tlsManagerSettings
 
 
 
@@ -317,26 +319,26 @@ waitIndexParam i = ("waitIndex", (toS $ show i))
 
 -- | Get the node at the given key.
 get :: Client -> Key -> IO (Maybe Node)
-get client key = runRequest' $ httpGET (keyUrl client key) []
+get client key = runRequest' $ httpGET (manager client) (keyUrl client key) []
 
 
 -- | Atomic Compare-and-Swap.
 setcas :: Value -> Client -> Key -> Value -> Maybe TTL -> IO (Maybe Node)
-setcas oldVal client key newVal mbTTL = do
-    runRequest' $  httpPUT (keyCasUrl client key oldVal) $
-               [("value",newVal)] ++ ttlParam mbTTL
+setcas oldVal client key newVal mbTTL =
+    runRequest' $  httpPUT (manager client) (keyCasUrl client key oldVal) $
+        ("value",newVal) : ttlParam mbTTL
 
 -- | Set the value at the given key.
 set :: Client -> Key -> Value -> Maybe TTL -> IO (Maybe Node)
 set client key value mbTTL =
-    runRequest' $ httpPUT (keyUrl client key) $
-        [("value",value)] ++ ttlParam mbTTL
+    runRequest' $ httpPUT (manager client) (keyUrl client key) $
+        ("value",value) : ttlParam mbTTL
 
 
 -- | Create a value in the given key. The key must be a directory.
 create :: Client -> Key -> Value -> Maybe TTL -> IO Node
 create client key value mbTTL = do
-    hr <- runRequest $ httpPOST (keyUrl client key) $
+    hr <- runRequest $ httpPOST (manager client) (keyUrl client key) $
         [("value",value)] ++ ttlParam mbTTL
 
     case hr of
@@ -347,27 +349,27 @@ create client key value mbTTL = do
 -- | Wait for changes on the node at the given key.
 wait :: Client -> Key -> IO (Maybe Node)
 wait client key =
-    runRequest' $ httpGET (keyUrl client key) [waitParam]
+    runRequest' $ httpGET (manager client) (keyUrl client key) [waitParam]
 
 
 -- | Same as 'wait' but at a given index.
 waitIndex :: Client -> Key -> Index -> IO (Maybe Node)
 waitIndex client key index =
-    runRequest' $ httpGET (keyUrl client key) $
+    runRequest' $ httpGET (manager client) (keyUrl client key) $
         [waitParam, waitIndexParam index]
 
 
 -- | Same as 'wait' but includes changes on children.
 waitRecursive :: Client -> Key -> IO (Maybe Node)
 waitRecursive client key =
-    runRequest' $ httpGET (keyUrl client key) $
+    runRequest' $ httpGET (manager client) (keyUrl client key) $
         [waitParam, waitRecursiveParam]
 
 
 -- | Same as 'waitIndex' but includes changes on children.
 waitIndexRecursive :: Client -> Key -> Index -> IO (Maybe Node)
 waitIndexRecursive client key index =
-    runRequest' $ httpGET (keyUrl client key) $
+    runRequest' $ httpGET (manager client) (keyUrl client key) $
         [waitParam, waitIndexParam index, waitRecursiveParam]
 
 
@@ -389,13 +391,13 @@ recursiveParam = [("recursive","true")]
 -- | Create a directory at the given key.
 createDirectory :: Client -> Key -> Maybe TTL -> IO ()
 createDirectory client key mbTTL =
-    void $ runRequest $ httpPUT (keyUrl client key) $ dirParam ++ ttlParam mbTTL
+    void $ runRequest $ httpPUT (manager client) (keyUrl client key) $ dirParam ++ ttlParam mbTTL
 
 
 -- | List all nodes within the given directory.
 listDirectoryContents :: Client -> Key -> IO [Node]
 listDirectoryContents client key = do
-    hr <- runRequest $ httpGET (keyUrl client key) []
+    hr <- runRequest $ httpGET (manager client) (keyUrl client key) []
     case hr of
         Left _ -> return []
         Right res -> do
@@ -409,7 +411,7 @@ listDirectoryContents client key = do
 -- that directory 'Node's will not contain their children.
 listDirectoryContentsRecursive :: Client -> Key -> IO [Node]
 listDirectoryContentsRecursive client key = do
-    hr <- runRequest $ httpGET (keyUrl client key) recursiveParam
+    hr <- runRequest $ httpGET (manager client) (keyUrl client key) recursiveParam
     case hr of
         Left _ -> return []
         Right res -> do
@@ -426,17 +428,10 @@ listDirectoryContentsRecursive client key = do
 -- can use 'removeDirectoryRecursive'.
 removeDirectory :: Client -> Key -> IO ()
 removeDirectory client key =
-    void $ runRequest $ httpDELETE (keyUrl client key) dirParam
+    void $ runRequest $ httpDELETE (manager client) (keyUrl client key) dirParam
 
 
 -- | Remove the directory at the given key, including all its children.
 removeDirectoryRecursive :: Client -> Key -> IO ()
 removeDirectoryRecursive client key =
-    void $ runRequest $ httpDELETE (keyUrl client key) $ dirParam ++ recursiveParam
-
-
--- | withManager has been removed form http-conduit-2.3
-withHttpManager :: (Manager -> IO a) -> IO a
-withHttpManager f = do
-    manager <- newManager tlsManagerSettings
-    f manager
+    void $ runRequest $ httpDELETE (manager client) (keyUrl client key) $ dirParam ++ recursiveParam
