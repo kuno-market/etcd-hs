@@ -41,7 +41,7 @@ randomKey = do
 
 setup :: IO (Client, ByteString)
 setup = do
-    client <- createClient [ "http://127.0.0.1:4001" ]
+    client <- createClient [ "http://127.0.0.1:2379" ]
     key    <- randomKey
 
     return (client, key)
@@ -73,11 +73,11 @@ spec = parallel $ do
 
         it "Using key TTL" $ do
             (client, key) <- setup
-            set client key "value" (Just 5)
+            set client key "value" (Just 1)
             node <- expectNode =<< get client key
             node `shouldBeLeaf` "value"
 
-            threadDelay $ 6 * 1000 * 1000
+            threadDelay $ 2 * 1000 * 1000
             node <- get client key
             node `shouldSatisfy` isNothing
 
